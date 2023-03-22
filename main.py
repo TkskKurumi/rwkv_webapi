@@ -26,9 +26,24 @@ def add_status(G: Generator):
                 generators.pop(i)
                 break
     return ret
-
+@app.get("/adjust")
+def get_cont(from_state: str, key: str, adj: float=-0.1):
+    g = generators[from_state]
+    adjust = copy.copy(g.adjust)
+    for token in g.tokenizer.encode(key):
+        adjust[token] = adjust.get(token, 0)+adj
+    print(adjust)
+    g = g.derive(adjust=adjust)
+    data = get_kwa(
+        state=add_status(g)
+    )
+    ret = get_kwa(
+        status=0,
+        data=data
+    )
+    return JSONResponse(ret)
 @app.get("/cont")
-def get_cont(from_state: str="", contents: str="", n: int=100, top_p=0.2):
+def get_cont(from_state: str="", contents: str="", n: int=100, top_p: float=0.2):
     if(from_state != ""):
         if(from_state in generators):
             g = generators.get(from_state)
@@ -44,6 +59,7 @@ def get_cont(from_state: str="", contents: str="", n: int=100, top_p=0.2):
         g = init_generator(contents)
     tokens = []
     g = g.derive(top_p=top_p)
+    from_state = add_status(g)
     for t in trange(n):
         token, g = g.sample()
         tokens.append(token)
@@ -53,6 +69,7 @@ def get_cont(from_state: str="", contents: str="", n: int=100, top_p=0.2):
     data = get_kwa(
         tokens = tokens,
         content = tokenizer.decode(tokens),
+        from_state = from_state,
         state = state
     )
     ret = {"status": 0, "data": data}

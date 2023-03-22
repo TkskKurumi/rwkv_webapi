@@ -74,7 +74,7 @@ class Generator:
         for k, v in self.occurrence.items():
             out[k] -= v*self.freq_penalty
         for k, v in self.adjust.items():
-            out[k] -= v
+            out[k] += v
         token = self.tokenizer.sample_logits(out, temperature=self.temperature, top_p=self.top_p)
         newout, newstate = self.model.forward([token], copy.deepcopy(self.state))
         new_occur = copy.copy(self.occurrence)
