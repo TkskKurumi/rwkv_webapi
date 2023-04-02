@@ -9,7 +9,7 @@ from threading import Lock
 import copy
 # prepare
 model_name = os.environ.get("RWKV_MODEL_PTH", "model.pth")
-strategy = os.environ.get("RWKV_STRATEGY", 'cuda fp16i8 *10 -> cuda fp16')
+strategy = os.environ.get("RWKV_STRATEGY", 'cuda fp16')
 AVOID_REPEAT = '，。：？！'
 os.environ["RWKV_JIT_ON"] = "1"
 
@@ -46,7 +46,10 @@ class Generator:
             nxt = self
         for i in range(n):
             token, nxt = nxt.sample()
-            yield token, nxt
+            if(token!=0):
+                yield token, nxt
+            else:
+                return
         return
     def feed(self, prompt_or_tokens, slice=4, **kwargs):
         if(isinstance(prompt_or_tokens, str)):

@@ -62,6 +62,8 @@ def get_cont(from_state: str="", contents: str="", n: int=100, top_p: float=0.2)
     from_state = add_status(g)
     for t in trange(n):
         token, g = g.sample()
+        if(token==0):
+            break
         tokens.append(token)
 
     state = add_status(g)
