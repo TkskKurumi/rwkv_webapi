@@ -36,6 +36,7 @@ class ContParam(BaseModel):
     top_p: float = 0.4
     temperature: float = 2
     recall: list|NoneType = None
+    stop_before: list|NoneType = None
     adjust: str = ""
     length: int = 50
     stop_at_eot: bool = True
@@ -71,7 +72,10 @@ def post_continue(from_state: str, data: ContParam):
         recall = [(0, tokenizer.encode(i)) for i in data.recall]
     else:
         recall = []
-
+    if(data.stop_before):
+        stop_before = [tokenizer.encode(i) for i in data.stop_before]
+    else:
+        stop_before = []
     G = generator.derive(
         top_p=data.top_p,
         temperature=data.temperature
@@ -84,7 +88,10 @@ def post_continue(from_state: str, data: ContParam):
         nonlocal tokens, generator
         tokens.append(token)
         Gs.append(G)
+    stopped = False
     for i in trange(data.length):
+        if(stopped):
+            break
         token, G = G.sample()
         if(token==0 and data.stop_at_eot):
             break
@@ -95,23 +102,25 @@ def post_continue(from_state: str, data: ContParam):
             append(token, G)
             contents = tokenizer.decode(tokens)
 
-        if(recall):
-            for idx, i in enumerate(recall):
-                cnt, sb = i
-                le = len(sb)
-                stopped = False
-                if(len(tokens)>le and tokens[-le:]==sb):
-                    print("recall", tokenizer.decode(sb), "from", contents)
-                    recall[idx] = (cnt+1, sb)
-                    tokens = tokens[:-le]
-                    G = Gs[-le-1]
-                    if(cnt>=2):
-                        stopped = True
-                        break    
-                    adj = {T:-0.1 for T in sb}
-                    G = G.derive(adjust=adj)
-                if(stopped):
-                    break
+        for idx, i in enumerate(recall):
+            cnt, sb = i
+            le = len(sb)
+            if(len(tokens)>le and tokens[-le:]==sb):
+                print("recall", tokenizer.decode(sb), "from", contents)
+                recall[idx] = (cnt+1, sb)
+                tokens = tokens[:-le]
+                G = Gs[-le-1]
+                adj = {T:-0.1 for T in sb}
+                G = G.derive(adjust=adj)
+        for idx, i in enumerate(stop_before):
+            sb = i
+            le = len(sb)
+            if(len(tokens)>le and tokens[-le:]==sb):
+                print("stop before", tokenizer.decode(sb), "from", contents)
+                tokens = tokens[:-le]
+                G = Gs[-le-1]
+                stopped = True
+
 
     contents = tokenizer.decode(tokens)
     state = add_status(G)
