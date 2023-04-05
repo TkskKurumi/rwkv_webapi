@@ -35,9 +35,15 @@ class Generator:
         kwa = dict()
         kwa.update(self.__dict__)
         kwa.update(kwargs)
+        
         if(kwa["occurrence"] is self.occurrence):
             kwa["occurrence"] = copy.copy(self.occurrence)
-        # assert kwa["occurrence"] is not self.occurrence, "Copying dict occurence, it'll be shared"
+
+        adj = copy.copy(self.adjust)
+        for k, v in kwargs.get("adjust", {}).items():
+            adj[k] = adj.get(k, 0) + v
+        kwa["adjust"] = adj
+
         return Generator(**kwa)
     def stream(self, n=50, **kwargs):
         if(kwargs):
