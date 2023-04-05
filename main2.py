@@ -34,7 +34,7 @@ INFER_LOCK = Lock()
 class ContParam(BaseModel):
     feed: str = ""
     top_p: float = 0.4
-    temperature: float = 2
+    temperature: float = 1
     recall: list|NoneType = None
     stop_before: list|NoneType = None
     adjust: str = ""
@@ -92,7 +92,8 @@ def post_continue(from_state: str, data: ContParam):
     for i in trange(data.length):
         if(stopped):
             break
-        token, G = G.sample()
+        with INFER_LOCK:
+            token, G = G.sample()
         if(token==0 and data.stop_at_eot):
             break
         append(token, G)
