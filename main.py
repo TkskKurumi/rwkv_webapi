@@ -2,77 +2,140 @@ from modules.initial import init_english_qa, init_generator, init_neko_a, tokeni
 from fastapi import FastAPI
 from fastapi.responses import Response, JSONResponse
 from tqdm import trange
-import copy
+import copy, json
+from typing import List
 from uuid import uuid4
 from threading import Lock
+from types import NoneType
+from pydantic import BaseModel
 base_generators = {
     "猫娘": init_neko_a(),
     "QA": init_english_qa()
 }
-generators = copy.copy(base_generators)
-INFER_LOCK = Lock()
+generators = {
+    **base_generators
+}
 
-app = FastAPI()
-
-
-get_kwa = lambda **kwargs:kwargs
 
 def add_status(G: Generator):
     ret = str(uuid4())
     generators[ret] = G
     if(len(generators)>25):
         for i in generators:
-            if(i not in base_generators):
-                generators.pop(i)
-                break
+            generators.pop(i)
+            break
+        for k, v in base_generators.items():
+            if(k not in generators):
+                generators[k] = v
     return ret
-@app.get("/adjust")
-def get_cont(from_state: str, key: str, adj: float=-0.1):
-    g = generators[from_state]
-    adjust = copy.copy(g.adjust)
-    for token in g.tokenizer.encode(key):
-        adjust[token] = adjust.get(token, 0)+adj
-    print(adjust)
-    g = g.derive(adjust=adjust)
-    data = get_kwa(
-        state=add_status(g)
+
+app = FastAPI()
+INFER_LOCK = Lock()
+class ContParam(BaseModel):
+    feed: str = ""
+    top_p: float = 0.4
+    temperature: float = 1
+    recall: list|NoneType = None
+    stop_before: list|NoneType = None
+    adjust: str = ""
+    length: int = 50
+    stop_at_eot: bool = True
+
+_makedict = lambda **kwargs:kwargs
+def _response(ret) -> JSONResponse:
+    code = 200 if ret["status"] == 0 else -ret["status"]
+    return JSONResponse(ret, status_code=code)
+
+@app.post("/cont/{from_state}")
+def post_continue(from_state: str, data: ContParam):
+    global generators
+    if(from_state=="new"):
+        if(not data.feed):
+            ret=_makedict(
+                status=-1,
+                message='Argument "feed" must be provided when creating new continuation Generator.'
+            )
+            return _response(ret)
+        generator = init_generator(data.feed)
+    else:
+        if(from_state not in generators):
+            ret=_makedict(
+                status=-404,
+                message="Generator '%s' not found."%(from_state)
+            )
+            return _response(ret)
+        generator = generators[from_state]
+        if(data.feed):
+            generator=generator.feed(data.feed)
+    
+    if(data.recall):
+        recall = [(0, tokenizer.encode(i)) for i in data.recall]
+    else:
+        recall = []
+    if(data.stop_before):
+        stop_before = [tokenizer.encode(i) for i in data.stop_before]
+    else:
+        stop_before = []
+    G = generator.derive(
+        top_p=data.top_p,
+        temperature=data.temperature
     )
-    ret = get_kwa(
+    init_G = G
+    init_state = add_status(init_G)
+    tokens = []
+    Gs: List[Generator] = []
+    def append(token, G):
+        nonlocal tokens, generator
+        tokens.append(token)
+        Gs.append(G)
+    stopped = False
+    for i in trange(data.length):
+        if(stopped):
+            break
+        with INFER_LOCK:
+            token, G = G.sample()
+        if(token==0 and data.stop_at_eot):
+            break
+        append(token, G)
+        contents = tokenizer.decode(tokens)
+        if(contents[-1] == "\ufffd"):
+            token, G = G.sample()
+            append(token, G)
+            contents = tokenizer.decode(tokens)
+
+        for idx, i in enumerate(recall):
+            cnt, sb = i
+            le = len(sb)
+            if(len(tokens)>le and tokens[-le:]==sb):
+                print("recall", tokenizer.decode(sb), "from", contents)
+                recall[idx] = (cnt+1, sb)
+                tokens = tokens[:-le]
+                G = Gs[-le-1]
+                adj = {T:-0.1 for T in sb}
+                G = G.derive(adjust=adj)
+        for idx, i in enumerate(stop_before):
+            sb = i
+            le = len(sb)
+            if(len(tokens)>le and tokens[-le:]==sb):
+                print("stop before", tokenizer.decode(sb), "from", contents)
+                tokens = tokens[:-le]
+                G = Gs[-le-1]
+                stopped = True
+
+
+    contents = tokenizer.decode(tokens)
+    state = add_status(G)
+    data = _makedict(
+        init_state = init_state,
+        state = state,
+        contents = contents,
+        full_history = tokenizer.decode(G.history)
+        # tokens = tokens
+    )
+    ret = _makedict(
         status=0,
         data=data
     )
-    return JSONResponse(ret)
-@app.get("/cont")
-def get_cont(from_state: str="", contents: str="", n: int=100, top_p: float=0.2):
-    if(from_state != ""):
-        if(from_state in generators):
-            g = generators.get(from_state)
-            if(contents):
-                g = g.feed(contents)
-        else:
-            ret = get_kwa(
-                status = -404,
-                message = "No such state."
-            )
-            return JSONResponse(ret)
-    else:
-        g = init_generator(contents)
-    tokens = []
-    g = g.derive(top_p=top_p)
-    from_state = add_status(g)
-    for t in trange(n):
-        token, g = g.sample()
-        if(token==0):
-            break
-        tokens.append(token)
-
-    state = add_status(g)
-
-    data = get_kwa(
-        tokens = tokens,
-        content = tokenizer.decode(tokens),
-        from_state = from_state,
-        state = state
-    )
-    ret = {"status": 0, "data": data}
-    return JSONResponse(ret)
+    return _response(ret)
+        
+    
