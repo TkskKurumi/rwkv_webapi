@@ -1,5 +1,19 @@
 # rwkv_api
-## Generator class
+## main.py
+fast-api web api
+```shell
+uvicorn main:app
+```
+
+## client example
+### example_client.py
+Example for web api client.
+
+### example QQ bot
+[yaqianbot](https://github.com/TkskKurumi/yaqianbot_v2/blob/dev/yaqianbot/plugins/plg_rwkvapi.py)
+
+
+## Generator Class
 For ease of use, introduce the Generator for status control.
 
 It contains following datas:
@@ -16,6 +30,3 @@ It provides following methods:
 
 ## CLIChat.py
 CLI chat test.
-
-## main.py
-fast-api web api.
