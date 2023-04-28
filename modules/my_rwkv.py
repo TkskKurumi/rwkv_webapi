@@ -21,7 +21,7 @@ from rwkv.utils import PIPELINE as TokenizerPipeline # nopep8
 
 class Generator:
     
-    def __init__(self, out, state, model: RWKV, tokenizer: TokenizerPipeline, temperature=1, top_p=0.2, freq_penalty=0.5, occurrence=None, adjust=None):
+    def __init__(self, out, state, model: RWKV, tokenizer: TokenizerPipeline, temperature=1, top_p=0.2, freq_penalty=0.5, occurrence=None, adjust=None, history=None):
         self.out = out
         self.state = state
         self.model = model
@@ -31,6 +31,7 @@ class Generator:
         self.freq_penalty = freq_penalty
         self.occurrence = occurrence if occurrence is not None else {}
         self.adjust = adjust if adjust is not None else {}
+        self.history = history if history is not None else []
     def derive(self, **kwargs):
         kwa = dict()
         kwa.update(self.__dict__)
@@ -38,7 +39,8 @@ class Generator:
         
         if(kwa["occurrence"] is self.occurrence):
             kwa["occurrence"] = copy.copy(self.occurrence)
-
+        if(kwa["history"] is self.history):
+            kwa["history"] = copy.copy(self.history)
         adj = copy.copy(self.adjust)
         for k, v in kwargs.get("adjust", {}).items():
             adj[k] = adj.get(k, 0) + v
@@ -57,7 +59,7 @@ class Generator:
             else:
                 return
         return
-    def feed(self, prompt_or_tokens, slice=4, **kwargs):
+    def feed(self, prompt_or_tokens, slice=2, **kwargs):
         if(isinstance(prompt_or_tokens, str)):
             tokens = self.tokenizer.encode(prompt_or_tokens)
         elif(isinstance(prompt_or_tokens, list)):
@@ -72,7 +74,7 @@ class Generator:
         for i in range(0, ntokens, slice):
             step_tokens = tokens[i:i+slice]
             out, state = self.model.forward(step_tokens, state)
-        newstat = self.derive(out=out, state=state, occurrence=new_occurrence, **kwargs)
+        newstat = self.derive(out=out, state=state, occurrence=new_occurrence, history=self.history+tokens, **kwargs)
         return newstat
     def sample(self, **kwargs):
         if(self.out is None):
@@ -88,7 +90,12 @@ class Generator:
         newout, newstate = self.model.forward([token], copy.deepcopy(self.state))
         new_occur = copy.copy(self.occurrence)
         new_occur[token] = new_occur.get(token, 0)+1
-        newstat = self.derive(out=newout, state=newstate, occurrence=new_occur)
+        newstat = self.derive(
+            out=newout,
+            state=newstate,
+            occurrence=new_occur,
+            history = self.history+[token]
+        )
         return token, newstat
         
 

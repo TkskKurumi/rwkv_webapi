@@ -39,6 +39,7 @@ class ContParam(BaseModel):
     stop_before: list|NoneType = None
     adjust: str = ""
     length: int = 50
+    min_length: int|NoneType = None
     stop_at_eot: bool = True
 
 _makedict = lambda **kwargs:kwargs
@@ -76,6 +77,10 @@ def post_continue(from_state: str, data: ContParam):
         stop_before = [tokenizer.encode(i) for i in data.stop_before]
     else:
         stop_before = []
+    if(data.min_length is not None):
+        min_length = data.min_length
+    else:
+        min_length = 1
     G = generator.derive(
         top_p=data.top_p,
         temperature=data.temperature
@@ -88,14 +93,31 @@ def post_continue(from_state: str, data: ContParam):
         nonlocal tokens, generator
         tokens.append(token)
         Gs.append(G)
+    def f_recall(forbid_tokens):
+        nonlocal tokens, Gs
+        le = len(forbid_tokens)
+        assert len(tokens)>le
+        assert tokens[-le:]==forbid_tokens
+        tokens = tokens[:-le]
+        Gs = Gs[:-le]
+        G = Gs[-1]
+        adj = {T:-abs(G.adjust.get(T, 0))-0.1 for T in forbid_tokens}
+        return G.derive(adjust=adj)
     stopped = False
     for i in trange(data.length):
         if(stopped):
             break
         with INFER_LOCK:
             token, G = G.sample()
-        if(token==0 and data.stop_at_eot):
-            break
+        if(token==0):
+            if(data.stop_at_eot):
+                if(len(tokens)>=min_length):
+                    break
+            # recall
+            G = Gs[-1] if Gs else init_G        
+            adj = {0:-0.1}
+            G = G.derive(adjust=adj)
+            continue
         append(token, G)
         contents = tokenizer.decode(tokens)
         if(contents[-1] == "\ufffd"):
@@ -108,20 +130,17 @@ def post_continue(from_state: str, data: ContParam):
             le = len(sb)
             if(len(tokens)>le and tokens[-le:]==sb):
                 print("recall", tokenizer.decode(sb), "from", contents)
-                recall[idx] = (cnt+1, sb)
-                tokens = tokens[:-le]
-                G = Gs[-le-1]
-                adj = {T:-0.1 for T in sb}
-                G = G.derive(adjust=adj)
+                G = f_recall(sb)
         for idx, i in enumerate(stop_before):
             sb = i
             le = len(sb)
             if(len(tokens)>le and tokens[-le:]==sb):
-                print("stop before", tokenizer.decode(sb), "from", contents)
-                tokens = tokens[:-le]
-                G = Gs[-le-1]
-                stopped = True
-
+                G = f_recall(sb)
+                stopped = len(tokens)>=min_length
+                if(stopped):
+                    print("stop before" ,tokenizer.decode(sb), "from", contents, 'len_tokens', len(tokens))
+                else:
+                    print("stop but not long enough" ,tokenizer.decode(sb), "from", contents)
 
     contents = tokenizer.decode(tokens)
     state = add_status(G)
