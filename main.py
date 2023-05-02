@@ -37,7 +37,7 @@ class ContParam(BaseModel):
     temperature: float = 1
     recall: list|NoneType = None
     stop_before: list|NoneType = None
-    adjust: str = ""
+    adjust: str|dict = ""
     length: int = 50
     min_length: int|NoneType = None
     stop_at_eot: bool = True
@@ -68,7 +68,25 @@ def post_continue(from_state: str, data: ContParam):
         generator = generators[from_state]
         if(data.feed):
             generator=generator.feed(data.feed)
-    
+    if(data.adjust):
+        try:
+            if(isinstance(data.adjust, str)):
+                j = json.loads(data.adjust)
+            elif(isinstance(data.adjust, dict)):
+                j = data.adjust
+            else:
+                assert False, type(data.adjust)
+            adj = {}
+            for k, v in j.items():
+                if(k=="<EOT>"):
+                    adj[0] = adj.get(0, 0)+v
+                else:
+                    for t in tokenizer.encode(k):
+                        adj[t] = adj.get(t, 0)+v
+            generator = generator.derive(adjust=adj)
+        except Exception as e:
+            print(e)
+        
     if(data.recall):
         recall = [(0, tokenizer.encode(i)) for i in data.recall]
     else:
