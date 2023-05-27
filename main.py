@@ -11,7 +11,6 @@ from pydantic import BaseModel
 
 sanity_check = init_generator("Sanity Check")
 
-
 base_generators = {
 }
 generators = {

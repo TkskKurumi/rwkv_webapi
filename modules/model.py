@@ -89,7 +89,9 @@ class RWKV(MyModule):
         self.merged_ratio = {}
         if(not lora):
             self.w_lora = None
+            self.need_lora_update = False
             return
+        self.need_lora_update = True
         with torch.no_grad():
             self.w_lora = torch.load(lora, map_location="cpu")
             if(lora_alpha is None):
@@ -635,12 +637,21 @@ class RWKV(MyModule):
                     if 'key.weight' in key or 'value.weight' in key or 'receptance.weight' in key or 'output.weight' in key or 'head.weight' in key:
                         delta_w = delta_w.t()
                     if(self.RESCALE_LAYER):
-                        delta_w = delta_w/ (2 ** int(layer_id // self.RESCALE_LAYER))
+                        if 'att.output.weight' in key:
+                            delta_w = delta_w/ (2 ** int(layer_id // self.RESCALE_LAYER))
+                        if 'ffn.value.weight' in key:
+                            delta_w = delta_w/ (2 ** int(layer_id // self.RESCALE_LAYER))
+                            
+
+                    if(delta_w.device!=ret.device):
+                        delta_w = delta_w.to(device=ret.device)
+
 
                     assert ret.shape == delta_w.shape, "shape does not match %s <-> %s"%(delta_w.shape, ret.shape)
-
+                    
                     ret = ret + delta_w
                     WARN(ret.device, self.w[key].device, ret.dtype, self.w[key].dtype)
+                    
                     self.merged_ratio[key] = lora_ratio
                     del self.w[key]
                     self.w[key] = ret
@@ -664,6 +675,10 @@ class RWKV(MyModule):
 
     def forward(self, tokens, state, full_output=False):
         # return self._forward(tokens, state, full_output)
+        if(self.need_lora_update):
+            for k in self.w.keys():
+                self.getw(k)
+            self.need_lora_update = False
         with torch.no_grad():
             w = self.w
             args = self.args

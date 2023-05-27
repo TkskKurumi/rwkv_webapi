@@ -14,8 +14,7 @@ AVOID_REPEAT = '，。：？！'
 os.environ["RWKV_JIT_ON"] = "1"
 
 # some settings must set before import
-from .model import RWKV
-# from rwkv.model import RWKV                          # nopep8
+from rwkv.model import RWKV                          # nopep8
 from rwkv.utils import PIPELINE as TokenizerPipeline # nopep8
 
 
@@ -120,7 +119,8 @@ if(lora_alpha is not None):
     lora_alpha = float(lora_alpha)
 lora_strategy = os.environ.get("LORA_STRATEGY", "constant(1)")
 
-model = RWKV(model=model_name, strategy=strategy, lora=lora_pth, lora_strategy=lora_strategy, lora_alpha=lora_alpha)
+# model = RWKV(model=model_name, strategy=strategy, lora=lora_pth, lora_strategy=lora_strategy, lora_alpha=lora_alpha, lora_mm_device="cuda:0")
+model = RWKV(model=model_name, strategy=strategy)
 tokenizer = TokenizerPipeline(model, "20B_tokenizer.json")
 
 
