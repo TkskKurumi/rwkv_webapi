@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+from tqdm import tqdm
 import os
 from . import torch_opt
 import torch
@@ -14,14 +14,15 @@ AVOID_REPEAT = '，。：？！'
 os.environ["RWKV_JIT_ON"] = "1"
 
 # some settings must set before import
-from rwkv.model import RWKV                          # nopep8
+from .model import RWKV
+# from rwkv.model import RWKV                          # nopep8
 from rwkv.utils import PIPELINE as TokenizerPipeline # nopep8
 
 
 
 class Generator:
     
-    def __init__(self, out, state, model: RWKV, tokenizer: TokenizerPipeline, temperature=1, top_p=0.2, freq_penalty=0.5, occurrence=None, adjust=None, history=None):
+    def __init__(self, out, state, model: RWKV, tokenizer: TokenizerPipeline, temperature=1, top_p=0.2, freq_penalty=0.5, occurrence=None, adjust=None, history=None, state_decay=0):
         self.out = out
         self.state = state
         self.model = model
@@ -32,6 +33,7 @@ class Generator:
         self.occurrence = occurrence if occurrence is not None else {}
         self.adjust = adjust if adjust is not None else {}
         self.history = history if history is not None else []
+        self.state_decay = state_decay
     def derive(self, **kwargs):
         kwa = dict()
         kwa.update(self.__dict__)
@@ -71,9 +73,18 @@ class Generator:
             new_occurrence[t] = new_occurrence.get(t, 0)+1
         ntokens = len(tokens)
         state = copy.deepcopy(self.state)
-        for i in range(0, ntokens, slice):
+        iterator = list(range(0, ntokens, slice))
+        if(len(iterator)>10):
+            iterator = tqdm(iterator)
+        for i in iterator:
             step_tokens = tokens[i:i+slice]
+            state0 = state
             out, state = self.model.forward(step_tokens, state)
+            if((state0 is not None) and (self.state_decay)):
+                decay = self.state_decay**len(step_tokens)
+                for idx, i in enumerate(state):
+                    state[idx] = state[idx]*(1-decay)+state0[idx]*decay
+
         newstat = self.derive(out=out, state=state, occurrence=new_occurrence, history=self.history+tokens, **kwargs)
         return newstat
     def sample(self, **kwargs):
@@ -88,6 +99,10 @@ class Generator:
             out[k] += v
         token = self.tokenizer.sample_logits(out, temperature=self.temperature, top_p=self.top_p)
         newout, newstate = self.model.forward([token], copy.deepcopy(self.state))
+        if((self.state is not None) and (self.state_decay)):
+            decay = self.state_decay
+            for idx, i in enumerate(newstate):
+                newstate[idx] = newstate[idx]*(1-decay)+self.state[idx]*decay
         new_occur = copy.copy(self.occurrence)
         new_occur[token] = new_occur.get(token, 0)+1
         newstat = self.derive(
@@ -99,7 +114,13 @@ class Generator:
         return token, newstat
         
 
-model = RWKV(model=model_name, strategy=strategy)
+lora_pth = os.environ.get("LORA_PTH", "")
+lora_alpha = os.environ.get("LORA_ALPHA")
+if(lora_alpha is not None):
+    lora_alpha = float(lora_alpha)
+lora_strategy = os.environ.get("LORA_STRATEGY", "constant(1)")
+
+model = RWKV(model=model_name, strategy=strategy, lora=lora_pth, lora_strategy=lora_strategy, lora_alpha=lora_alpha)
 tokenizer = TokenizerPipeline(model, "20B_tokenizer.json")
 
 

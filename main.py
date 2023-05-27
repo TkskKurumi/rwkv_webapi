@@ -8,9 +8,11 @@ from uuid import uuid4
 from threading import Lock
 from types import NoneType
 from pydantic import BaseModel
+
+sanity_check = init_generator("Sanity Check")
+
+
 base_generators = {
-    "猫娘": init_neko_a(),
-    "QA": init_english_qa()
 }
 generators = {
     **base_generators
