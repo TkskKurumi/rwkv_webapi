@@ -21,7 +21,7 @@ generators = {
 def add_status(G: Generator):
     ret = str(uuid4())
     generators[ret] = G
-    if(len(generators)>25):
+    if(len(generators)>100):
         for i in generators:
             generators.pop(i)
             break
@@ -42,7 +42,7 @@ class ContParam(BaseModel):
     length: int = 50
     min_length: int|NoneType = None
     stop_at_eot: bool = True
-
+    ignore_occurrence: list|NoneType = None
 _makedict = lambda **kwargs:kwargs
 def _response(ret) -> JSONResponse:
     code = 200 if ret["status"] == 0 else -ret["status"]
@@ -68,7 +68,8 @@ def post_continue(from_state: str, data: ContParam):
             return _response(ret)
         generator = generators[from_state]
         if(data.feed):
-            generator=generator.feed(data.feed)
+            with INFER_LOCK:
+                generator=generator.feed(data.feed)
     if(data.adjust):
         try:
             if(isinstance(data.adjust, str)):
@@ -106,6 +107,8 @@ def post_continue(from_state: str, data: ContParam):
     )
     init_G = G
     init_state = add_status(init_G)
+    if(init_G.state is not None):
+        init_G.debug_state(init_G.state)
     tokens = []
     Gs: List[Generator] = []
     def append(token, G):
@@ -123,43 +126,43 @@ def post_continue(from_state: str, data: ContParam):
         adj = {T:-abs(G.adjust.get(T, 0))-0.1 for T in forbid_tokens}
         return G.derive(adjust=adj)
     stopped = False
-    for i in trange(data.length):
-        if(stopped):
-            break
-        with INFER_LOCK:
-            token, G = G.sample()
-        if(token==0):
-            if(data.stop_at_eot):
-                if(len(tokens)>=min_length):
-                    break
-            # recall
-            G = Gs[-1] if Gs else init_G        
-            adj = {0:-0.1}
-            G = G.derive(adjust=adj)
-            continue
-        append(token, G)
-        contents = tokenizer.decode(tokens)
-        if(contents[-1] == "\ufffd"):
-            token, G = G.sample()
+    with INFER_LOCK:
+        for i in trange(data.length):
+            if(stopped):
+                break
+            token, G = G.sample(ignore_occurence=data.ignore_occurrence)
+            if(token==0):
+                if(data.stop_at_eot):
+                    if(len(tokens)>=min_length):
+                        break
+                # recall
+                G = Gs[-1] if Gs else init_G        
+                adj = {0:-0.1}
+                G = G.derive(adjust=adj)
+                continue
             append(token, G)
             contents = tokenizer.decode(tokens)
+            if(contents[-1] == "\ufffd"):
+                token, G = G.sample()
+                append(token, G)
+                contents = tokenizer.decode(tokens)
 
-        for idx, i in enumerate(recall):
-            cnt, sb = i
-            le = len(sb)
-            if(len(tokens)>le and tokens[-le:]==sb):
-                print("recall", tokenizer.decode(sb), "from", contents)
-                G = f_recall(sb)
-        for idx, i in enumerate(stop_before):
-            sb = i
-            le = len(sb)
-            if(len(tokens)>le and tokens[-le:]==sb):
-                G = f_recall(sb)
-                stopped = len(tokens)>=min_length
-                if(stopped):
-                    print("stop before" ,tokenizer.decode(sb), "from", contents, 'len_tokens', len(tokens))
-                else:
-                    print("stop but not long enough" ,tokenizer.decode(sb), "from", contents)
+            for idx, i in enumerate(recall):
+                cnt, sb = i
+                le = len(sb)
+                if(len(tokens)>le and tokens[-le:]==sb):
+                    print("recall", tokenizer.decode(sb), "from", contents)
+                    G = f_recall(sb)
+            for idx, i in enumerate(stop_before):
+                sb = i
+                le = len(sb)
+                if(len(tokens)>le and tokens[-le:]==sb):
+                    G = f_recall(sb)
+                    stopped = len(tokens)>=min_length
+                    if(stopped):
+                        print("stop before" ,tokenizer.decode(sb), "from", contents, 'len_tokens', len(tokens))
+                    else:
+                        print("stop but not long enough" ,tokenizer.decode(sb), "from", contents)
 
     contents = tokenizer.decode(tokens)
     state = add_status(G)

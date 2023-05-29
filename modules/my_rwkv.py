@@ -21,7 +21,7 @@ from rwkv.utils import PIPELINE as TokenizerPipeline # nopep8
 
 class Generator:
     
-    def __init__(self, out, state, model: RWKV, tokenizer: TokenizerPipeline, temperature=1, top_p=0.2, freq_penalty=0.5, occurrence=None, adjust=None, history=None, state_decay=0):
+    def __init__(self, out, state, model: RWKV, tokenizer: TokenizerPipeline, temperature=1, top_p=0.2, freq_penalty=0.5, occurrence=None, adjust=None, history=None, state_decay=0, std_clip=768, mean_clip=20):
         self.out = out
         self.state = state
         self.model = model
@@ -33,6 +33,61 @@ class Generator:
         self.adjust = adjust if adjust is not None else {}
         self.history = history if history is not None else []
         self.state_decay = state_decay
+        self.std_clip = std_clip
+        self.mean_clip = mean_clip
+
+    def debug_state(self, S):
+        with torch.no_grad():
+            max_mean = 0
+            max_std  = 0
+            for s in S:
+                mean = torch.mean(s)
+                max_mean = max(max_mean, mean, key=lambda x:abs(x))
+                std = torch.std(s)
+                max_std = max(std, max_std)
+            print("max std = %.3f, max mean = %.3f"%(max_std, max_mean))
+            
+
+    def do_mean_clip(self, S):
+        if(not self.mean_clip):
+            return S
+        with torch.no_grad():
+            max_mean = 0
+            for s in S:
+                mean = torch.mean(s)
+                max_mean = max(max_mean, mean, key=lambda x:abs(x))
+            
+            if(max_mean>self.mean_clip):
+                print("clipping mean", max_mean, self.mean_clip)
+                _S = []
+                for s in S:
+                    s = s/max_mean*self.mean_clip
+                    _S.append(s)
+                S = _S
+            return S
+    def do_std_clip(self, S):
+        if(not self.std_clip):
+            return S
+        with torch.no_grad():
+            max_std = 0
+            
+            for s in S:
+                # print(s)
+                std = torch.std(s)
+                
+                # print(std)
+                max_std = max(max_std, std)
+                
+            if(max_std>self.std_clip):
+                print("clipping std", max_std, self.std_clip)
+                _S = []
+                for s in S:
+                    mn = s.mean()
+                    s = (s-mn)/max_std*self.std_clip + mn
+                    _S.append(s)
+                S = _S
+            return S
+
     def derive(self, **kwargs):
         kwa = dict()
         kwa.update(self.__dict__)
@@ -83,16 +138,21 @@ class Generator:
                 decay = self.state_decay**len(step_tokens)
                 for idx, i in enumerate(state):
                     state[idx] = state[idx]*(1-decay)+state0[idx]*decay
+            state = self.do_mean_clip(state)
+            state = self.do_std_clip(state)
 
         newstat = self.derive(out=out, state=state, occurrence=new_occurrence, history=self.history+tokens, **kwargs)
         return newstat
-    def sample(self, **kwargs):
+    def sample(self, ignore_occurence=None, **kwargs):
         if(self.out is None):
             raise ValueError("generator is not initialized with initial prompt.")
         if(kwargs):
             return self.derive(**kwargs).sample()
         out = copy.deepcopy(self.out)
+
         for k, v in self.occurrence.items():
+            if(ignore_occurence and k in ignore_occurence):
+                continue
             out[k] -= v*self.freq_penalty
         for k, v in self.adjust.items():
             out[k] += v
@@ -102,6 +162,9 @@ class Generator:
             decay = self.state_decay
             for idx, i in enumerate(newstate):
                 newstate[idx] = newstate[idx]*(1-decay)+self.state[idx]*decay
+        newstate = self.do_mean_clip(newstate)
+        newstate = self.do_std_clip(newstate)
+
         new_occur = copy.copy(self.occurrence)
         new_occur[token] = new_occur.get(token, 0)+1
         newstat = self.derive(
