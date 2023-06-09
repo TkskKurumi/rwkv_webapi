@@ -1,7 +1,8 @@
 from .my_rwkv import model, tokenizer, Generator
-def init_generator(prompt):
+def init_generator(prompt=""):
     ret = Generator(None, None, model, tokenizer)
-    ret = ret.feed(prompt)
+    if(prompt):
+        ret = ret.feed(prompt)
     return ret
 def init_neko(neko_name="千千"):
     prompt = f"""

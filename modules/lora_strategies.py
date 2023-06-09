@@ -1,4 +1,5 @@
 import torch
+from tqdm import tqdm
 def constant(ratio):
     def inner(depth):
         return ratio
@@ -27,13 +28,15 @@ def get_fstrategy(x):
 
 
 def apply_lora(self, lora_w, fstrategy, lora_alpha, mm_device=None, revert=False):
+    foo = fstrategy
     if(not revert):
         if(getattr(self, "_lora_w", None) is not None):
             print("Reverting lora")
             if((self._lora_w is lora_w) and lora_alpha==self._lora_alpha):
                 old_fstrategy = self._fstrategy
                 new_fstrategy = fstrategy
-                fstrategy = lambda x:new_fstrategy(x)-old_fstrategy(x)
+                foo = lambda x:new_fstrategy(x)-old_fstrategy(x)
+                
             else:
                 apply_lora(
                     self,
@@ -43,9 +46,12 @@ def apply_lora(self, lora_w, fstrategy, lora_alpha, mm_device=None, revert=False
                     mm_device,
                     True
                 )
+    print(foo, sum([foo(x/31) for x in range(32)])/32)
     with torch.no_grad():
         # lora_w = torch.load(lora_w)
-        for key in self.w.keys():
+        ls = list(self.w.keys())
+        iterator = tqdm(ls)
+        for key in iterator:
             if(key.startswith("blocks.")):
                 pref = key[:-len(".weight")]
                 key_A = pref+".lora_A"
@@ -56,7 +62,9 @@ def apply_lora(self, lora_w, fstrategy, lora_alpha, mm_device=None, revert=False
                     w = self.w[key]
                     layer_id = int(key.split('.')[1]) if ('blocks.' in key) else 0
                     layer_depth = layer_id/(self.args.n_layer-1)
-                    lora_ratio = fstrategy(layer_depth)
+                    lora_ratio = foo(layer_depth)
+                    if(lora_ratio==0):
+                        continue
                     if(revert):
                         lora_ratio = -lora_ratio
                     lora_A = lora_w[key_A].to(device=mm_device, dtype=w.dtype)
@@ -78,16 +86,17 @@ def apply_lora(self, lora_w, fstrategy, lora_alpha, mm_device=None, revert=False
                         
                     if(self.RESCALE_LAYER):
                         if 'att.output.weight' in key:
-                            delta_w = delta_w/(2 ** int(layer_id // self.RESCALE_LAYER))
+                            deltaw = deltaw/(2 ** int(layer_id // self.RESCALE_LAYER))
                         if 'ffn.value.weight' in key:
-                            delta_w = delta_w/(2 ** int(layer_id // self.RESCALE_LAYER))
+                            deltaw = deltaw/(2 ** int(layer_id // self.RESCALE_LAYER))
 
                     if(device!=w.device):
                         deltaw = deltaw.to(device=w.device)
                     
                     self.w[key]+=deltaw
                     delta = deltaw.abs().sum()
-                    print("Merged %s with alpha/rank*ratio = %.2f/%.2f*%.2f = %.3f, |delta w|=%.3f"%(key, lora_alpha, lora_rank, lora_ratio, lora_alpha/lora_rank*lora_ratio, delta), end="\n")
+                    iterator.desc = "%s: %.2f"%(key, lora_ratio)
+                    # print("Merged %s with alpha/rank*ratio = %.2f/%.2f*%.2f = %.3f, |delta w|=%.3f"%(key, lora_alpha, lora_rank, lora_ratio, lora_alpha/lora_rank*lora_ratio, delta), end="\n")
 
     self._lora_w = lora_w
     self._fstrategy = fstrategy

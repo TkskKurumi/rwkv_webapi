@@ -1,12 +1,14 @@
 from __future__ import annotations
 from tqdm import tqdm
-import os
+import os, math
+from os import path
 from . import torch_opt
 import torch
 from dataclasses import dataclass
 from types import NoneType
 from threading import Lock
 import copy
+from torch.nn import functional as F
 # prepare
 model_name = os.environ.get("RWKV_MODEL_PTH", "model.pth")
 strategy = os.environ.get("RWKV_STRATEGY", 'cuda fp16')
@@ -115,7 +117,7 @@ class Generator:
             else:
                 return
         return
-    def feed(self, prompt_or_tokens, slice=2, **kwargs):
+    def feed(self, prompt_or_tokens, slice=1, return_inconfidence=False, **kwargs):
         if(isinstance(prompt_or_tokens, str)):
             tokens = self.tokenizer.encode(prompt_or_tokens)
         elif(isinstance(prompt_or_tokens, list)):
@@ -130,9 +132,19 @@ class Generator:
         iterator = list(range(0, ntokens, slice))
         if(len(iterator)>10):
             iterator = tqdm(iterator)
+        out = self.out
+        inconf = 0
+        n_inconf = 0
         for i in iterator:
             step_tokens = tokens[i:i+slice]
             state0 = state
+            if(out is not None):
+                token = step_tokens[0]
+                probs = F.softmax(out.float(), dim=-1).cpu().numpy()
+                prob = probs[token]
+                n_inconf += 1
+                inconf += math.log(prob)
+                
             out, state = self.model.forward(step_tokens, state)
             if((state0 is not None) and (self.state_decay)):
                 decay = self.state_decay**len(step_tokens)
@@ -142,7 +154,11 @@ class Generator:
             state = self.do_std_clip(state)
 
         newstat = self.derive(out=out, state=state, occurrence=new_occurrence, history=self.history+tokens, **kwargs)
-        return newstat
+        if(return_inconfidence):
+            return inconf/n_inconf, newstat
+            
+        else:
+            return newstat
     def sample(self, ignore_occurence=None, **kwargs):
         if(self.out is None):
             raise ValueError("generator is not initialized with initial prompt.")
@@ -182,9 +198,19 @@ if(lora_alpha is not None):
     lora_alpha = float(lora_alpha)
 lora_strategy = os.environ.get("LORA_STRATEGY", "constant(1)")
 
-# model = RWKV(model=model_name, strategy=strategy, lora=lora_pth, lora_strategy=lora_strategy, lora_alpha=lora_alpha, lora_mm_device="cuda:0")
+vocab = os.environ.get("RWKV_VOCAB", "20B_tokenizer.json")
+
 model = RWKV(model=model_name, strategy=strategy)
-tokenizer = TokenizerPipeline(model, "20B_tokenizer.json")
+
+tokenizer = TokenizerPipeline(model, vocab)
+
+from .lora_strategies import apply_lora, get_fstrategy
+if(path.exists(lora_pth)):
+    with torch.no_grad():
+        w = torch.load(lora_pth, map_location="cpu")
+        apply_lora(model, w, get_fstrategy(lora_strategy), lora_alpha, mm_device="cuda:0")
+else:
+    pass
 
 
 if(__name__=="__main__"):

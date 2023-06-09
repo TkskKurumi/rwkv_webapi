@@ -3,6 +3,8 @@ from fastapi import FastAPI
 from fastapi.responses import Response, JSONResponse
 from tqdm import trange
 import copy, json
+import torch, time
+import numpy as np
 from typing import List
 from uuid import uuid4
 from threading import Lock
@@ -14,20 +16,21 @@ sanity_check = init_generator("Sanity Check")
 base_generators = {
 }
 generators = {
-    **base_generators
 }
+G_time = {}
 
-
+def get_status(key):
+    G_time[key] = time.time()
+    return generators[key]
 def add_status(G: Generator):
+    global generators, G_time
     ret = str(uuid4())
     generators[ret] = G
-    if(len(generators)>100):
-        for i in generators:
-            generators.pop(i)
-            break
-        for k, v in base_generators.items():
-            if(k not in generators):
-                generators[k] = v
+    G_time[ret] = time.time()
+    if(len(generators)>200):
+        st = sorted(list(generators), key=lambda x:G_time[x], reverse=True)[:200]
+        _generators = {s: generators[s] for s in st}
+        generators = _generators
     return ret
 
 app = FastAPI()
@@ -66,7 +69,7 @@ def post_continue(from_state: str, data: ContParam):
                 message="Generator '%s' not found."%(from_state)
             )
             return _response(ret)
-        generator = generators[from_state]
+        generator = get_status(from_state)
         if(data.feed):
             with INFER_LOCK:
                 generator=generator.feed(data.feed)
@@ -142,7 +145,7 @@ def post_continue(from_state: str, data: ContParam):
                 continue
             append(token, G)
             contents = tokenizer.decode(tokens)
-            if(contents[-1] == "\ufffd"):
+            while(contents[-1] == "\ufffd"):
                 token, G = G.sample()
                 append(token, G)
                 contents = tokenizer.decode(tokens)
@@ -179,4 +182,86 @@ def post_continue(from_state: str, data: ContParam):
     )
     return _response(ret)
         
+class VecDistParam(BaseModel):
+    query: str
+    compare_with: list
+    method: str = "centered_cosine"
+    layers: list|NoneType = None
+    states: list|NoneType = None
+@app.post("/vec_dist")
+def post_vec_dist(data: VecDistParam):
+    query = data.query
+    if(query not in generators):
+        j = _makedict(
+            status=-404,
+            query=query,
+            message="Generator %s not found"%query
+        )
+        resp = _response(j)
+        return resp
+    else:
+        # query = generators[query]
+        query = get_status(query)
+    compare_with = {}
+    for k in data.compare_with:
+        if(k in generators):
+            compare_with[k] = get_status(k)
+        else:
+            j = _makedict(
+                status=-404,
+                compare_with=k,
+                message="Generator %s not found"%k
+            )
+            resp = _response(j)
+            return resp
+    
+    layers = data.layers if data.layers is not None else [0.5]
+    states = data.states if data.states is not None else [4]
+    def get_state(G: Generator):
+        nonlocal layers, states
+        S = G.state
+        _ = _makedict(
+            sx=0,
+            aa=1,
+            bb=2,
+            pp=3,
+            ffn=4
+        )
+        ret = []
+        for layer_idx in layers:
+            if(0<layer_idx and layer_idx<1):
+                layer_idx = int(layer_idx*len(states)/5)
+            for state_idx in states:
+                state_idx = _.get(state_idx, state_idx)
+                ret.append(S[layer_idx*5+state_idx].to(torch.float32).cpu().numpy())
+        return ret
+
+
+
+    # if(data.method=="center_dot"):
+    def f(g0, g1):
+        ss0 = get_state(g0)
+        ss1 = get_state(g1)
+        ret = 0
+        for idx, s0 in enumerate(ss0):
+            s1: np.ndarray = ss1[idx]
+            s0: np.ndarray = s0-s0.mean()
+            s1: np.ndarray = s1-s1.mean()
+            nm0 = (s0**2).sum()**0.5
+            nm1 = (s1**2).sum()**0.5
+            dist = (s0*s1).sum()/nm0/nm1
+            dist = (1-dist)/2
+            ret+=dist
+        return ret/len(ss0)
+
+    dists = {k: f(query, v) for k, v in compare_with.items()}
+
+    ret = _makedict(
+        status=0,
+        data=dists
+    )
+    return _response(ret)
+
+
+            
     
