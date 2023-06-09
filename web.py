@@ -16,12 +16,18 @@ with gr.Blocks() as demo:
             G: Generator = states[key]
         else:
             G: Generator = init_generator("")
+            G = G.derive(adjust={0: -10})
         
         G = G.feed(f"User: {message}\n菜菜: ")
+
         stop_ats = ["User:", "User："]
         stop_ats = [tokenizer.encode(i) for i in stop_ats]
+        ignore_occur = set()
+        for i in ["\n", "User:", "菜菜:"]:
+            tokens = tokenizer.encode(i)
+            ignore_occur.update(tokens)
 
-        steps = list(range(50))
+        steps = list(range(100))
         progbar = prog.tqdm(steps)
 
         token = None
@@ -49,14 +55,14 @@ with gr.Blocks() as demo:
                 
 
         for i in progbar:
-            token, G = G.sample()
+            token, G = G.sample(ignore_occurence=ignore_occur)
             append(token, G)
             if(recall([0])):
                break
             for i in range(5):
                 if(contents[-1]!='\ufffd'):
                     break
-                token, G = G.sample()
+                token, G = G.sample(ignore_occurence=ignore_occur)
                 append(token, G)
             progbar.desc = contents
             for stop_at in stop_ats:
