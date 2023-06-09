@@ -27,29 +27,18 @@ def get_fstrategy(x):
 
 
 
-def apply_lora(self, lora_w, fstrategy, lora_alpha, mm_device=None, revert=False):
+def apply_lora(w, lora_w, fstrategy, lora_alpha, mm_device=None, model=None):
     foo = fstrategy
-    if(not revert):
-        if(getattr(self, "_lora_w", None) is not None):
-            print("Reverting lora")
-            if((self._lora_w is lora_w) and lora_alpha==self._lora_alpha):
-                old_fstrategy = self._fstrategy
-                new_fstrategy = fstrategy
-                foo = lambda x:new_fstrategy(x)-old_fstrategy(x)
-                
-            else:
-                apply_lora(
-                    self,
-                    self._lora_w, 
-                    self._fstrategy,
-                    self._lora_alpha,
-                    mm_device,
-                    True
-                )
     print(foo, sum([foo(x/31) for x in range(32)])/32)
+    if(model is not None):
+        n_layer = model.args.n_layer
+        RESCALE_LAYER = model.RESCALE_LAYER
+    else:
+        n_layer = 32
+        RESCALE_LAYER = 0
     with torch.no_grad():
         # lora_w = torch.load(lora_w)
-        ls = list(self.w.keys())
+        ls = list(w.keys())
         iterator = tqdm(ls)
         for key in iterator:
             if(key.startswith("blocks.")):
@@ -57,48 +46,79 @@ def apply_lora(self, lora_w, fstrategy, lora_alpha, mm_device=None, revert=False
                 key_A = pref+".lora_A"
                 key_B = pref+".lora_B"
                 lora_found = key_A in lora_w and key_B in lora_w
-                int8 = key+"_mx" in self.w
+                int8 = key+"_mx" in w
                 if(lora_found and not int8):
-                    w = self.w[key]
+                    layer_w = w[key]
                     layer_id = int(key.split('.')[1]) if ('blocks.' in key) else 0
-                    layer_depth = layer_id/(self.args.n_layer-1)
+                    layer_depth = layer_id/(n_layer-1)
                     lora_ratio = foo(layer_depth)
                     if(lora_ratio==0):
                         continue
-                    if(revert):
-                        lora_ratio = -lora_ratio
-                    lora_A = lora_w[key_A].to(device=mm_device, dtype=w.dtype)
-                    lora_B = lora_w[key_B].to(device=mm_device, dtype=w.dtype)
+                    lora_A = lora_w[key_A].to(device=mm_device, dtype=layer_w.dtype)
+                    lora_B = lora_w[key_B].to(device=mm_device, dtype=layer_w.dtype)
                     if (mm_device is None):
-                        device = w.device
+                        device = layer_w.device
                     else:
                         device = mm_device
                     lora_rank = lora_A.shape[0]
                     deltaw = (lora_B@lora_A)*lora_alpha/lora_rank*lora_ratio
                     
-                    if(deltaw.shape!=w.shape):
+                    if(deltaw.shape!=layer_w.shape):
                         shape0 = list(deltaw.shape)[::-1]
-                        shape1 = list(w.shape)
+                        shape1 = list(layer_w.shape)
                         if(shape0==shape1):
                             deltaw = deltaw.T
                         else:
                             raise Exception("Shape does not match")
                         
-                    if(self.RESCALE_LAYER):
+                    if(RESCALE_LAYER):
                         if 'att.output.weight' in key:
-                            deltaw = deltaw/(2 ** int(layer_id // self.RESCALE_LAYER))
+                            deltaw = deltaw/(2 ** int(layer_id // RESCALE_LAYER))
                         if 'ffn.value.weight' in key:
-                            deltaw = deltaw/(2 ** int(layer_id // self.RESCALE_LAYER))
+                            deltaw = deltaw/(2 ** int(layer_id // RESCALE_LAYER))
 
-                    if(device!=w.device):
-                        deltaw = deltaw.to(device=w.device)
+                    if(device!=layer_w.device):
+                        deltaw = deltaw.to(device=layer_w.device)
                     
-                    self.w[key]+=deltaw
+                    w[key]+=deltaw
                     delta = deltaw.abs().sum()
                     iterator.desc = "%s: %.2f"%(key, lora_ratio)
                     # print("Merged %s with alpha/rank*ratio = %.2f/%.2f*%.2f = %.3f, |delta w|=%.3f"%(key, lora_alpha, lora_rank, lora_ratio, lora_alpha/lora_rank*lora_ratio, delta), end="\n")
 
-    self._lora_w = lora_w
-    self._fstrategy = fstrategy
-    self._lora_alpha = lora_alpha
     print()
+
+class LoRA:
+    def __init__(self, model, lora_pth, strategy, lora_alpha, mm_device="cuda", auto_revert=False):
+
+        self.lora_pth = lora_pth
+
+        self.model = model
+        with torch.no_grad():
+            self.w = torch.load(lora_pth, map_location="cpu")
+        self.strategy = strategy
+        self.lora_alpha = lora_alpha
+        self.mm_device = mm_device
+        self.auto_revert = auto_revert
+
+        self.applied = False
+
+    def apply(self):
+        apply_lora(self.model.w, self.w, self.strategy, self.lora_alpha, mm_device=self.mm_device, model=self.model)
+        self.applied = True
+    def revert(self):
+        delta_strategy = lambda x:-self.strategy(x)
+        apply_lora(self.model.w, self.w, self.strategy, self.lora_alpha, mm_device=self.mm_device, model=self.model)
+        self.applied = False
+    def change_strategy(self, strategy):
+        if(self.applied):
+            delta_strategy = lambda x:strategy(x) - self.strategy(x)
+            apply_lora(self.model.w, self.w, delta_strategy, self.lora_alpha, mm_device=self.mm_device, model=self.model)
+            self.strategy = strategy
+        else:
+            apply_lora(self.model.w, self.w, strategy, self.lora_alpha, mm_device=self.mm_device, model=self.model)
+    
+    def __del__(self):
+        if(self.applied):
+            print("WARNING: LoRA", self.lora_pth, "is not reverted before exit")
+            if(self.auto_revert):
+                self.revert()

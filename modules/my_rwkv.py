@@ -16,7 +16,8 @@ AVOID_REPEAT = '，。：？！'
 os.environ["RWKV_JIT_ON"] = "1"
 
 # some settings must set before import
-from rwkv.model import RWKV                          # nopep8
+from .model import RWKV
+# from rwkv.model import RWKV                          # nopep8
 from rwkv.utils import PIPELINE as TokenizerPipeline # nopep8
 
 
@@ -200,18 +201,21 @@ lora_strategy = os.environ.get("LORA_STRATEGY", "constant(1)")
 
 vocab = os.environ.get("RWKV_VOCAB", "20B_tokenizer.json")
 
-model = RWKV(model=model_name, strategy=strategy)
 
-tokenizer = TokenizerPipeline(model, vocab)
 
-from .lora_strategies import apply_lora, get_fstrategy
+
+
+from .lora_strategies import apply_lora, get_fstrategy, LoRA
 if(path.exists(lora_pth)):
-    with torch.no_grad():
-        w = torch.load(lora_pth, map_location="cpu")
-        apply_lora(model, w, get_fstrategy(lora_strategy), lora_alpha, mm_device="cuda:0")
-else:
-    pass
+    def preprocess_weight(model):
+        lora = LoRA(model, lora_pth, get_fstrategy(lora_strategy), lora_alpha)
+        lora.apply()
 
+else:
+    preprocess_weight = None
+
+model = RWKV(model=model_name, strategy=strategy, preprocess_weight=preprocess_weight)
+tokenizer = TokenizerPipeline(model, vocab)
 
 if(__name__=="__main__"):
     import traceback

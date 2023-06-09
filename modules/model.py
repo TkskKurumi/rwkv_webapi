@@ -2,10 +2,14 @@
 # The RWKV Language Model - https://github.com/BlinkDL/RWKV-LM
 ########################################################################################################
 
+##
+# Copied from original RWKV Model, add lora when init
+##
+
 import types, gc, os, time, re
 import torch
+from tqdm import tqdm
 from torch.nn import functional as F
-from . import lora_strategies
 torch.backends.cudnn.benchmark = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -75,40 +79,9 @@ else:
 
 ########################################################################################################
 
-_warned = {}
-def WARN(*args, sep=" ", end="\n"):
-    st = sep.join([str(i) for i in args]) + end
-    if(st not in _warned):
-        print(*args, sep=sep, end=end)
-        # _warned[st] = True
-        
-
 class RWKV(MyModule):
-
-    def _init_lora(self, lora, lora_strategy="constant(1)", lora_alpha=None, lora_mm_device=None):
-        self.merged_ratio = {}
-        if(not lora):
-            self.w_lora = None
-            self.need_lora_update = False
-            return
-        self.need_lora_update = True
-        with torch.no_grad():
-            self.w_lora = torch.load(lora, map_location="cpu")
-            if(lora_alpha is None):
-                for key in self.w_lora:
-                    if(key.endswith("lora_A")):
-                        v = self.w_lora[key]
-                        lora_rank = v.shape[0]
-                        WARN("assuming lora_alpha = lora_rank =", lora_rank)
-                        lora_alpha = lora_rank
-        self.lora_strategy = lora_strategies.get_fstrategy(lora_strategy)
-        self.lora_alpha = lora_alpha
-        self.lora_mm_device = lora_mm_device
-    def __init__(self, model, strategy, verbose = True, convert_and_save_and_exit = None, lora="", lora_strategy="constant(1)", lora_alpha=None, lora_mm_device=None):
+    def __init__(self, model, strategy, verbose = True, convert_and_save_and_exit = None, preprocess_weight=None):
         super().__init__()
-
-        self._init_lora(lora, lora_strategy, lora_alpha, lora_mm_device)
-
         if verbose:
             prxxx = lambda *args, **kwargs: print(*args, **kwargs)
         else:
@@ -155,6 +128,9 @@ class RWKV(MyModule):
             for x in keys:
                 layer_id = int(x.split('.')[1]) if ('blocks.' in x) else 0
                 args.n_layer = max(args.n_layer, layer_id+1)
+
+            if (callable(preprocess_weight)):
+                preprocess_weight(self)
 
             ####################### Compute strategy
 
@@ -236,7 +212,7 @@ class RWKV(MyModule):
 
             print_need_newline = False
             keys = list(w.keys())
-            for x in keys:
+            for x in tqdm(keys):
                 w[x].requires_grad = False
                 layer_id = int(x.split('.')[1]) if ('blocks.' in x) else 0
                 if ('ln_out.' in x) or ('head.' in x):
@@ -263,10 +239,8 @@ class RWKV(MyModule):
                     elif '.time_first' in x: # need fp32 for this
                         w[x] = w[x].float()
                     else:
-                        # the w is matrix and not embedding
                         if (len(w[x].shape) == 2) and ('emb' not in x):
                             if WTYPE != torch.uint8:
-                                # no need for quantization
                                 w[x] = w[x].to(dtype=WTYPE)
                             else:
                                 w[x] = w[x].float()
@@ -587,98 +561,8 @@ class RWKV(MyModule):
             return x + out, xx[-1,:], aa, bb, pp
 
     ########################################################################################################
-    
-    def getw(self, key, ratio=0, is_revert=False):
-        ret = self.w[key]
-        # return ret
-
-        if(ratio):
-            lora_ratio = ratio
-        else:
-            layer_id = int(key.split('.')[1]) if ('blocks.' in key) else 0
-            layer_depth = layer_id/(self.args.n_layer-1)
-            lora_ratio = self.lora_strategy(layer_depth)
-
-        if(self.w_lora is None):
-            return ret
-        if(lora_ratio == 0):
-            return ret
-        elif(lora_ratio == self.merged_ratio.get(key, 0)):
-            return ret
-
-        
-        
-        w_lora = self.w_lora
-        if(key.startswith("blocks.")):
-            pref = key[:-len(".weight")]
-            key_A = pref+".lora_A"
-            key_B = pref+".lora_B"
-            do_lora = key_A in w_lora and key_B in w_lora
-            if(key+"_mx" in self.w):
-                WARN("Currently not support LoRA for quantized weights.")
-                do_lora = False
-            if(do_lora):
-                with torch.no_grad():
-                    if(not is_revert):
-                        mratio = self.merged_ratio.get(key, 0)
-                        if(mratio!=0 and lora_ratio != mratio):
-                            ret = self.getw(key, -mratio, is_revert=True)
-                    if(self.lora_mm_device):
-                        device = self.lora_mm_device
-                    else:
-                        device = ret.device
-                    lora_A = w_lora[key_A].to(device=device, dtype=ret.dtype)
-                    lora_B = w_lora[key_B].to(device=device, dtype=ret.dtype)
-                    lora_rank = lora_A.shape[0]
-                    assert lora_rank == lora_B.shape[1]
-                    lora_alpha = self.lora_alpha
-                    WARN("Calc LoRA for", key, "on device", lora_A.device, "with alpha = ", lora_ratio)
-                    delta_w = (lora_B @ lora_A)*lora_alpha*lora_ratio/lora_rank
-                    if 'key.weight' in key or 'value.weight' in key or 'receptance.weight' in key or 'output.weight' in key or 'head.weight' in key:
-                        delta_w = delta_w.t()
-                    if(self.RESCALE_LAYER):
-                        if 'att.output.weight' in key:
-                            delta_w = delta_w/ (2 ** int(layer_id // self.RESCALE_LAYER))
-                        if 'ffn.value.weight' in key:
-                            delta_w = delta_w/ (2 ** int(layer_id // self.RESCALE_LAYER))
-                            
-
-                    if(delta_w.device!=ret.device):
-                        delta_w = delta_w.to(device=ret.device)
-
-
-                    assert ret.shape == delta_w.shape, "shape does not match %s <-> %s"%(delta_w.shape, ret.shape)
-                    
-                    ret = ret + delta_w
-                    WARN(ret.device, self.w[key].device, ret.dtype, self.w[key].dtype)
-                    
-                    self.merged_ratio[key] = lora_ratio
-                    del self.w[key]
-                    self.w[key] = ret
-
-        if(key.startswith("blocks.")):
-            layer_id = int(key.split('.')[1]) if ('blocks.' in key) else 0
-            layer_depth = layer_id/(self.args.n_layer-1)
-            do_mix = key in self.w_lora
-            do_mix = False
-            if(do_mix):
-                w: torch.tensor = self.w_lora[key]
-                WARN("Found", key, "in LoRA_w, mixing with alpha = ", lora_ratio)
-                if(ret.shape!=w.shape):
-                    w = torch.squeeze(w)
-                    self.w_lora[key] = w
-                assert ret.shape == w.shape, "shape does not match %s <-> %s"%(w.shape, ret.shape)
-                ret = ret*(1-lora_ratio)+ w*lora_ratio
-                self.w[key] = ret
-        self.merged_ratio[key] = lora_ratio
-        return ret
 
     def forward(self, tokens, state, full_output=False):
-        # return self._forward(tokens, state, full_output)
-        if(self.need_lora_update):
-            for k in self.w.keys():
-                self.getw(k)
-            self.need_lora_update = False
         with torch.no_grad():
             w = self.w
             args = self.args
@@ -781,158 +665,6 @@ class RWKV(MyModule):
                     x, state[i*5+4],
                     w[f'{bbb}ln2.weight'], w[f'{bbb}ln2.bias'],
                     w[f'{ffn}time_mix_k'], w[f'{ffn}time_mix_r'],
-                    kw, vw, rw,
-                    kmx, krx, kmy, kry,
-                    vmx, vrx, vmy, vry,
-                    rmx, rrx, rmy, rry,                    
-                    )
-                if dd.stream:                
-                    del kw, vw, rw
-                
-                if self.RESCALE_LAYER > 0:
-                    if (i+1) % self.RESCALE_LAYER == 0:
-                        x = x / 2
-            
-            dd = self.strategy[args.n_layer]
-            x = x[-1,:] if (seq_mode and (not full_output)) else x
-            x = x.to(dtype=dd.atype, device=dd.device)
-            
-            x = F.layer_norm(x, (args.n_embd,), weight=w['ln_out.weight'], bias=w['ln_out.bias'])
-            if w['head.weight'].dtype != torch.uint8:
-                x = x @ w['head.weight']
-            else:
-                if seq_mode and full_output:
-                    x = self.mm8_seq(x, w['head.weight'], w['head.weight_mx'], w['head.weight_rx'], w['head.weight_my'], w['head.weight_ry'])
-                else:
-                    x = self.mm8_one(x, w['head.weight'], w['head.weight_mx'], w['head.weight_rx'], w['head.weight_my'], w['head.weight_ry'])
-
-            return x.float(), state
-
-
-    def _forward(self, tokens, state, full_output=False):
-        with torch.no_grad():
-            w = self.w
-            # print(type(self.w))
-            args = self.args
-
-            if state == None:
-                state = [None] * args.n_layer * 5
-                for i in range(args.n_layer): # state: 0=att_xx 1=att_aa 2=att_bb 3=att_pp 4=ffn_xx
-                    dd = self.strategy[i]
-                    dev = dd.device
-                    atype = dd.atype
-                    state[i*5+0] = torch.zeros(args.n_embd, dtype=atype, requires_grad=False, device=dev).contiguous()
-                    state[i*5+1] = torch.zeros(args.n_embd, dtype=torch.float, requires_grad=False, device=dev).contiguous()
-                    state[i*5+2] = torch.zeros(args.n_embd, dtype=torch.float, requires_grad=False, device=dev).contiguous()
-                    state[i*5+3] = torch.zeros(args.n_embd, dtype=torch.float, requires_grad=False, device=dev).contiguous() - 1e30
-                    state[i*5+4] = torch.zeros(args.n_embd, dtype=atype, requires_grad=False, device=dev).contiguous()
-
-            seq_mode = len(tokens) > 1
-
-            x = w['emb.weight'][tokens if seq_mode else tokens[0]]
-
-            for i in range(args.n_layer):
-                layer_id = i
-                bbb = f'blocks.{i}.'
-                att = f'blocks.{i}.att.'
-                ffn = f'blocks.{i}.ffn.'
-                dd = self.strategy[i]
-                dev = dd.device
-                atype = dd.atype
-                wtype = dd.wtype
-                if seq_mode:
-                    if 'cuda' in str(dev) and os.environ["RWKV_CUDA_ON"] == '1':
-                        ATT = self.cuda_att_seq if wtype != torch.uint8 else self.cuda_att_seq_i8
-                    else:
-                        ATT = self.att_seq if wtype != torch.uint8 else self.att_seq_i8
-                    FFN = self.ffn_seq if wtype != torch.uint8 else self.ffn_seq_i8
-                else:
-                    ATT = self.att_one if wtype != torch.uint8 else self.att_one_i8
-                    FFN = self.ffn_one if wtype != torch.uint8 else self.ffn_one_i8
-
-                x = x.to(dtype=atype, device=dev)
-
-                kw = self.getw(f'{att}key.weight')
-                vw = self.getw(f'{att}value.weight')
-                rw = self.getw(f'{att}receptance.weight')
-                ow = self.getw(f'{att}output.weight')
-
-                layer_norm_weight = self.getw(f"blocks.{layer_id}.ln1.weight")
-                layer_norm_bias   = self.getw(f"blocks.{layer_id}.ln1.bias")
-
-                tmix_k = self.getw(f"{att}time_mix_k")
-                tmix_v = self.getw(f"{att}time_mix_v")
-                tmix_r = self.getw(f"{att}time_mix_r")
-                t_decay = self.getw(f"{att}time_decay")
-                t_first = self.getw(f"{att}time_first")
-
-
-
-                if dd.stream:
-                    kw = kw.to(device=dev, non_blocking=True)
-                    vw = vw.to(device=dev, non_blocking=True)
-                    rw = rw.to(device=dev, non_blocking=True)
-                    ow = ow.to(device=dev, non_blocking=True)
-                kmx = w[f'{att}key.weight_mx'] if wtype == torch.uint8 else x
-                krx = w[f'{att}key.weight_rx'] if wtype == torch.uint8 else x
-                kmy = w[f'{att}key.weight_my'] if wtype == torch.uint8 else x
-                kry = w[f'{att}key.weight_ry'] if wtype == torch.uint8 else x
-                vmx = w[f'{att}value.weight_mx'] if wtype == torch.uint8 else x
-                vrx = w[f'{att}value.weight_rx'] if wtype == torch.uint8 else x
-                vmy = w[f'{att}value.weight_my'] if wtype == torch.uint8 else x
-                vry = w[f'{att}value.weight_ry'] if wtype == torch.uint8 else x
-                rmx = w[f'{att}receptance.weight_mx'] if wtype == torch.uint8 else x
-                rrx = w[f'{att}receptance.weight_rx'] if wtype == torch.uint8 else x
-                rmy = w[f'{att}receptance.weight_my'] if wtype == torch.uint8 else x
-                rry = w[f'{att}receptance.weight_ry'] if wtype == torch.uint8 else x
-                omx = w[f'{att}output.weight_mx'] if wtype == torch.uint8 else x
-                orx = w[f'{att}output.weight_rx'] if wtype == torch.uint8 else x
-                omy = w[f'{att}output.weight_my'] if wtype == torch.uint8 else x
-                ory = w[f'{att}output.weight_ry'] if wtype == torch.uint8 else x
-                x, state[i*5+0], state[i*5+1], state[i*5+2], state[i*5+3] = ATT(
-                    x, state[i*5+0], state[i*5+1], state[i*5+2], state[i*5+3],
-                    layer_norm_weight, layer_norm_bias,
-                    tmix_k, tmix_v, tmix_r,
-                    t_decay, t_first ,
-                    kw, vw, rw, ow,
-                    kmx, krx, kmy, kry,
-                    vmx, vrx, vmy, vry,
-                    rmx, rrx, rmy, rry,
-                    omx, orx, omy, ory,
-                    )
-                if dd.stream:
-                    del kw, vw, rw, ow
-
-                kw = self.getw(f'{ffn}key.weight')
-                vw = self.getw(f'{ffn}value.weight')
-                rw = self.getw(f'{ffn}receptance.weight')
-
-                layer_norm_weight = self.getw(f"blocks.{layer_id}.ln2.weight")
-                layer_norm_bias   = self.getw(f"blocks.{layer_id}.ln2.bias")
-
-                tmix_k = self.getw(f"{ffn}time_mix_k")
-                tmix_r = self.getw(f"{ffn}time_mix_r")
-
-                if dd.stream:
-                    kw = kw.to(device=dev, non_blocking=True)
-                    vw = vw.to(device=dev, non_blocking=True)
-                    rw = rw.to(device=dev, non_blocking=True)
-                kmx = w[f'{ffn}key.weight_mx'] if wtype == torch.uint8 else x
-                krx = w[f'{ffn}key.weight_rx'] if wtype == torch.uint8 else x
-                kmy = w[f'{ffn}key.weight_my'] if wtype == torch.uint8 else x
-                kry = w[f'{ffn}key.weight_ry'] if wtype == torch.uint8 else x
-                vmx = w[f'{ffn}value.weight_mx'] if wtype == torch.uint8 else x
-                vrx = w[f'{ffn}value.weight_rx'] if wtype == torch.uint8 else x
-                vmy = w[f'{ffn}value.weight_my'] if wtype == torch.uint8 else x
-                vry = w[f'{ffn}value.weight_ry'] if wtype == torch.uint8 else x
-                rmx = w[f'{ffn}receptance.weight_mx'] if wtype == torch.uint8 else x
-                rrx = w[f'{ffn}receptance.weight_rx'] if wtype == torch.uint8 else x
-                rmy = w[f'{ffn}receptance.weight_my'] if wtype == torch.uint8 else x
-                rry = w[f'{ffn}receptance.weight_ry'] if wtype == torch.uint8 else x                    
-                x, state[i*5+4] = FFN(
-                    x, state[i*5+4],
-                    layer_norm_weight, layer_norm_bias,
-                    tmix_k, tmix_r,
                     kw, vw, rw,
                     kmx, krx, kmy, kry,
                     vmx, vrx, vmy, vry,
