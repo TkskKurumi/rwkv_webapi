@@ -216,14 +216,14 @@ class VecDistParam(BaseModel):
     states: list|NoneType = None
 
 @app.get("/lora_strategy")
-def get_lora_strategry(strategry: str):
+def get_lora_strategry(strategy: str):
     if(USING_LORA is None):
         return make_response(
             status=404,
             message="Not using LoRA"
         )
     else:
-        fstrategy = get_fstrategy(strategry)
+        fstrategy = get_fstrategy(strategy)
         USING_LORA.change_strategy(fstrategy)
         return make_response(
             status=0,
