@@ -6,7 +6,7 @@ uvicorn main:app
 ```
 
 ## client example
-### example_client.py
+### client/__init__.py
 Example for web api client.
 
 ### example QQ bot
