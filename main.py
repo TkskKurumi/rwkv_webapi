@@ -1,4 +1,6 @@
 from modules.initial import init_english_qa, init_generator, init_neko_a, tokenizer, Generator
+from modules.my_rwkv import USING_LORA
+from modules.lora_strategies import get_fstrategy
 from fastapi import FastAPI
 from fastapi.responses import Response, JSONResponse
 from tqdm import trange
@@ -51,6 +53,14 @@ def _response(ret) -> JSONResponse:
     code = 200 if ret["status"] == 0 else -ret["status"]
     return JSONResponse(ret, status_code=code)
 
+def make_response(**kwargs) -> JSONResponse:
+    j = kwargs
+    stat = j.get("status", 0)
+    j["status"] = stat
+    code = 200 if stat==0 else -stat
+    return JSONResponse(j, status_code=code)
+
+
 @app.post("/cont/{from_state}")
 def post_continue(from_state: str, data: ContParam):
     global generators
@@ -91,7 +101,16 @@ def post_continue(from_state: str, data: ContParam):
             generator = generator.derive(adjust=adj)
         except Exception as e:
             print(e)
-        
+    
+    if(data.ignore_occurrence is not None):
+        tokens = set()
+        for idx, i in enumerate(data.ignore_occurrence):
+            if(isinstance(i, str)):
+                tokens.update(tokenizer.encode(i))
+        ignore_occur_tokens = tokens
+    else:
+        ignore_occur_tokens = []
+
     if(data.recall):
         recall = [(0, tokenizer.encode(i)) for i in data.recall]
     else:
@@ -133,7 +152,7 @@ def post_continue(from_state: str, data: ContParam):
         for i in trange(data.length):
             if(stopped):
                 break
-            token, G = G.sample(ignore_occurence=data.ignore_occurrence)
+            token, G = G.sample(ignore_occurence=ignore_occur_tokens)
             if(token==0):
                 if(data.stop_at_eot):
                     if(len(tokens)>=min_length):
@@ -145,10 +164,17 @@ def post_continue(from_state: str, data: ContParam):
                 continue
             append(token, G)
             contents = tokenizer.decode(tokens)
-            while(contents[-1] == "\ufffd"):
+            for i in range(5):
+                if(contents[-1] != "\ufffd"):
+                    break
                 token, G = G.sample()
-                append(token, G)
-                contents = tokenizer.decode(tokens)
+                if(token==0):
+                    adj = {0:-1}
+                    G = Gs[-1] if Gs else init_G        
+                    G = G.derive(adjust=adj)
+                else:
+                    append(token, G)
+                    contents = tokenizer.decode(tokens)
 
             for idx, i in enumerate(recall):
                 cnt, sb = i
@@ -188,6 +214,22 @@ class VecDistParam(BaseModel):
     method: str = "centered_cosine"
     layers: list|NoneType = None
     states: list|NoneType = None
+
+@app.get("/lora_strategy")
+def get_lora_strategry(strategry: str):
+    if(USING_LORA is None):
+        return make_response(
+            status=404,
+            message="Not using LoRA"
+        )
+    else:
+        fstrategy = get_fstrategy(strategry)
+        USING_LORA.change_strategy(fstrategy)
+        return make_response(
+            status=0,
+            message="OK"
+        )
+
 @app.post("/vec_dist")
 def post_vec_dist(data: VecDistParam):
     query = data.query

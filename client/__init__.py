@@ -1,5 +1,5 @@
 import requests
-HOST = "http://localhost:8000"
+HOST = "http://localhost:8001"
 makeargs = lambda **kwargs: kwargs
 class Client:
     def __init__(self, state="new", temperature=1.5, top_p=0.5, stop_before=None, recall=None, history="", last_gen="", last_feed=""):
@@ -17,14 +17,17 @@ class Client:
         for k, v in kwargs.items():
             d[k] = v
         return Client(**d)
-    def cont(self, feed="", length=100):
+    def cont(self, feed="", length=100, ignore_occurrence=None):
+        if(ignore_occurrence is None):
+            ignore_occurrence = []
         args = makeargs(
             feed=feed,
             top_p = self.top_p,
             temperature = self.temperature,
             stop_before = self.stop_before,
             recall = self.recall,
-            length = length
+            length = length,
+            ignore_occurrence=ignore_occurrence
         )
         url = "/".join([HOST, "cont", self.state])
         resp = requests.post(url, json=args)

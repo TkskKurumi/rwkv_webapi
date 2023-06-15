@@ -14,6 +14,7 @@ model_name = os.environ.get("RWKV_MODEL_PTH", "model.pth")
 strategy = os.environ.get("RWKV_STRATEGY", 'cuda fp16')
 AVOID_REPEAT = '，。：？！'
 os.environ["RWKV_JIT_ON"] = "1"
+os.environ["RWKV_CUDA_ON"] = "1"
 
 # some settings must set before import
 from .model import RWKV
@@ -24,7 +25,7 @@ from rwkv.utils import PIPELINE as TokenizerPipeline # nopep8
 
 class Generator:
     
-    def __init__(self, out, state, model: RWKV, tokenizer: TokenizerPipeline, temperature=1, top_p=0.2, freq_penalty=0.5, occurrence=None, adjust=None, history=None, state_decay=0, std_clip=768, mean_clip=20):
+    def __init__(self, out, state, model: RWKV, tokenizer: TokenizerPipeline, temperature=1, top_p=0.2, freq_penalty=0.5, occurrence=None, adjust=None, history=None, state_decay=0, std_clip=0, mean_clip=0):
         self.out = out
         self.state = state
         self.model = model
@@ -44,9 +45,9 @@ class Generator:
             max_mean = 0
             max_std  = 0
             for s in S:
-                mean = torch.mean(s)
+                mean = torch.mean(s).cpu()
                 max_mean = max(max_mean, mean, key=lambda x:abs(x))
-                std = torch.std(s)
+                std = torch.std(s).cpu()
                 max_std = max(std, max_std)
             print("max std = %.3f, max mean = %.3f"%(max_std, max_mean))
             
@@ -208,10 +209,12 @@ vocab = os.environ.get("RWKV_VOCAB", "20B_tokenizer.json")
 from .lora_strategies import apply_lora, get_fstrategy, LoRA
 if(path.exists(lora_pth)):
     def preprocess_weight(model):
-        lora = LoRA(model, lora_pth, get_fstrategy(lora_strategy), lora_alpha)
-        lora.apply()
+        global USING_LORA
+        USING_LORA = LoRA(model, lora_pth, get_fstrategy(lora_strategy), lora_alpha)
+        USING_LORA.apply()
 
 else:
+    USING_LORA = None
     preprocess_weight = None
 
 model = RWKV(model=model_name, strategy=strategy, preprocess_weight=preprocess_weight)
